@@ -5,10 +5,10 @@
 
 namespace py = pybind11;
 
-float dot_product(float* x, float* y, size_t n) {
+float dot_product(const float* x, const float* y, size_t y_dim, size_t n) {
     float acc = 0;
     for (int i = 0; i < n; i++) {
-        acc += x[i] * y[i];
+        acc += x[i] * y[i * y_dim];
     }
     return acc;
 }
@@ -56,37 +56,50 @@ void softmax_regression_epoch_cpp(const float *X, const unsigned char *y,
     // Loop through each batch.
     size_t num_batches = m / batch;
     for (size_t i = 0; i < num_batches; i++) {
-        size_t batch_base_ind = i * batch * n;
+        size_t batch_base_ind = i * batch;
         // Loop through each example within a single batch.
         std::vector<float> gradients;
-        gradients.reserve(ki);
+        size_t gradient_size = n * k;
+        gradients.resize(gradient_size);
+        std::vector<float> intermediates;
+        intermediates.resize(k);
         for (size_t j = 0; j < batch; j++) {
+            memset(gradients.data(), 0, sizeof(float) * gradient_size);
+            memset(intermediates.data(), 0, sizeof(float) * k);
             size_t item_ind = batch_base_ind + j;
-            std::vector<float> intermediates;
-            intermediates.reserve(ki);
-            float total_softmax = 0;
+            size_t y_ind = shuffled_indices[item_ind];
+            size_t x_ind = y_ind * n;
+            float max_dp = 0;
             // Compute individual softmax for each class K
             for (size_t ki = 0; ki < k; ki++) {
-                float softmax_i = std::exp(dot_product(x + item_ind, theta + ki, n));
-                total_softmax += softmax_i;
-                intermediates.push_back(softmax_i);
+                intermediates[ki] = dot_product(X + x_ind, theta + ki, k, n);
+                if (intermediates[ki] > max_dp) {
+                    max_dp = intermediates[ki];
+                }
             }
+            float total_softmax = 0;
             for (size_t ki = 0; ki < k; ki++) {
-                intermediates[ki] /= total_softmax;
+                intermediates[ki] = std::exp(intermediates[ki] - max_dp);
+                total_softmax += intermediates[ki];
             }
-            // Compute cost based on resulting vs expected
-            float total_cost = 0;
             for (size_t ki = 0; ki < k; ki++) {
                 float cost_base = 0;
-                if (y[item_ind] == ki) {
+                if (y[y_ind] == ki) {
                     cost_base = 1;
                 }
-                gradients[ki] += cost_base - intermediates[ki];
+                intermediates[ki] = intermediates[ki] / total_softmax - cost_base;
+            }
+            // Compute gradients = XT(z-ey)
+            float total_cost = 0;
+            for (size_t ni = 0; ni < n; ni++) {
+                for (size_t ki = 0; ki < k; ki++) {
+                    gradients[ni * k + ki] += X[x_ind + ni] * intermediates[ki];
+                }
             }
         }
         // Average the gradients for the minibatch.
-        for (size_t ki = 0; ki < k; ki++) {
-            theta[ki] -= gradients[ki] / batch * lr;
+        for (size_t g = 0; g < gradient_size; g++) {
+            theta[g] -= gradients[g] / batch * lr;
         }
     }
     /// END YOUR CODE

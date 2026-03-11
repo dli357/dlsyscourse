@@ -48,7 +48,49 @@ def parse_mnist(image_filename, label_filename):
                 for MNIST will contain the values 0-9.
     """
     ### BEGIN YOUR CODE
-    pass
+    def get_np_dtype_str(datatype_encoded: int):
+        match datatype_encoded:
+            case 0x08:
+                dtype = "B"
+            case 0x09:
+                dtype = "b"
+            case 0x0B:
+                dtype = "h"
+            case 0x0C:
+                dtype = "i"
+            case 0x0D:
+                dtype = "f"
+            case 0x0E:
+                dtype = "d"
+        return f">{dtype}"
+
+    with gzip.open(image_filename, "rb") as f:
+        magic, datatype_encoded, num_dims = struct.unpack(">HBB", f.read(4))
+        assert magic == 0
+        np_dtype_str = get_np_dtype_str(datatype_encoded)
+        dims = []
+        for x in range(num_dims):
+            if x > 1:
+                dims[1] *= struct.unpack(">I", f.read(4))[0]
+            else:
+                dims.append(struct.unpack(">I", f.read(4))[0])
+        image_np_array = np.frombuffer(f.read(), dtype=np_dtype_str)
+        min_image_val = np.min(image_np_array)
+        max_image_val = np.max(image_np_array)
+        image_np_array = ((image_np_array - min_image_val) / (max_image_val - min_image_val)).astype("float32")
+        image_np_array = image_np_array.reshape(*dims)
+    with gzip.open(label_filename, "rb") as f:
+        magic, datatype_encoded, num_dims = struct.unpack(">HBB", f.read(4))
+        assert magic == 0
+        np_dtype_str = get_np_dtype_str(datatype_encoded)
+        dims = []
+        for x in range(num_dims):
+            if x > 1:
+                dims[1] *= struct.unpack(">I", f.read(4))[0]
+            else:
+                dims.append(struct.unpack(">I", f.read(4))[0])
+        label_np_array = np.frombuffer(f.read(), dtype=np_dtype_str).reshape(*dims)
+    return (image_np_array, label_np_array)
     ### END YOUR CODE
 
 
@@ -68,7 +110,8 @@ def softmax_loss(Z, y):
         Average softmax loss over the sample.
     """
     ### BEGIN YOUR CODE
-    pass
+    # Formula: loss = -hy(x) + log(sum(exp(hj(x))))
+    return np.average(np.log(np.sum(np.exp(Z), axis=1)) - Z[np.arange(y.shape[0]), y]) # indexes into Z using y
     ### END YOUR CODE
 
 
@@ -91,7 +134,24 @@ def softmax_regression_epoch(X, y, theta, lr = 0.1, batch=100):
         None
     """
     ### BEGIN YOUR CODE
-    pass
+    k = theta.shape[1]
+    def softmax(v):
+        v_max = np.max(v, axis=1)
+        v_max_broadcasted = np.column_stack([v_max] * 10)
+        exp_v = np.exp(v - v_max_broadcasted)
+        return exp_v / np.sum(exp_v, axis=1)[:, None]
+    one_hot_y = np.zeros((y.size, k))
+    one_hot_y[np.arange(y.size), y] = 1
+    num_batches = X.shape[0] // batch
+    # Initially I tried performing a single batch update by reshaping the dataset into
+    # (num_batches, batch, n), but that did not work (jumped too far).
+    for x in range(num_batches):
+        minibatch_x = X[x * batch: (x+1) * batch].reshape(batch, X.shape[1])
+        minibatch_y = one_hot_y[x * batch: (x+1) * batch]
+        XT = minibatch_x.transpose()
+        Z = softmax(np.matmul(minibatch_x, theta))
+        gradient = np.matmul(XT, (Z - minibatch_y).reshape(batch, theta.shape[1]))
+        theta -= lr * gradient / batch
     ### END YOUR CODE
 
 
@@ -118,7 +178,61 @@ def nn_epoch(X, y, W1, W2, lr = 0.1, batch=100):
         None
     """
     ### BEGIN YOUR CODE
-    pass
+    k = W2.shape[1]
+    def softmax(v):
+        v_max = np.max(v, axis=1)
+        v_max_broadcasted = np.column_stack([v_max] * k)
+        exp_v = np.exp(v - v_max_broadcasted)
+        return exp_v / np.sum(exp_v, axis=1)[:, None]
+    one_hot_y = np.zeros((y.size, k))
+    one_hot_y[np.arange(y.size), y] = 1
+    num_batches = X.shape[0] // batch
+    for x in range(num_batches):
+        minibatch_x = X[x * batch: (x+1) * batch].reshape(batch, X.shape[1])
+        minibatch_y = one_hot_y[x * batch: (x+1) * batch]
+        layers = [W1, W2]
+        # We want to cache both Zi and the next computed preactivation ZiWi
+        Z = [(minibatch_x, np.matmul(minibatch_x, W1))]
+        """
+        Full neural network implementation w/ backprop
+        """
+        # Forward pass
+        for ind, layer in enumerate(layers):
+            prev_z, pre_activation_z = Z[ind]
+            # Replace last layer ReLU with softmax
+            if ind < len(layers) - 1:
+                next_z = np.maximum(0, pre_activation_z)
+            else:
+                next_z = softmax(pre_activation_z) - minibatch_y
+            if ind < len(layers) - 1:
+                next_pre_activation_z = np.matmul(next_z, layers[ind + 1])
+            else:
+                next_pre_activation_z = None
+            Z.append((next_z, next_pre_activation_z))
+        # Backwards pass
+        G = [None] * len(Z)
+        G[-1] = Z[-1][0]
+        for ind, layer in enumerate(layers[::-1]):
+            curr_ind = len(Z) - ind - 2
+            curr_z, pre_activation_z = Z[curr_ind]
+            if ind == 0:
+                temp_g = G[curr_ind + 1]
+            else:
+                temp_g = G[curr_ind + 1] * np.where(pre_activation_z > 0, 1.0, 0.0)
+            G[curr_ind] = np.matmul(temp_g, layer.transpose())
+            layer -= lr * np.matmul(curr_z.transpose(), temp_g) / batch
+
+        """
+        Hardcoded variant for verification
+
+        xw1 = np.matmul(minibatch_x, W1)
+        z2 = np.maximum(0, xw1)
+        s_minus_i = softmax(np.matmul(z2, W2)) - minibatch_y
+        grad_w2 = np.matmul(z2.transpose(), s_minus_i)
+        grad_w1 = np.matmul(minibatch_x.transpose(), np.matmul(s_minus_i, W2.transpose()) * np.where(xw1 > 0, 1.0, 0.0))
+        W2 -= lr * grad_w2 / batch
+        W1 -= lr * grad_w1 / batch
+        """
     ### END YOUR CODE
 
 
@@ -171,7 +285,7 @@ if __name__ == "__main__":
                              "data/t10k-labels-idx1-ubyte.gz")
 
     print("Training softmax regression")
-    train_softmax(X_tr, y_tr, X_te, y_te, epochs=10, lr = 0.1)
+    train_softmax(X_tr, y_tr, X_te, y_te, epochs=10, lr = 0.1, cpp=False)
 
     print("\nTraining two layer neural network w/ 100 hidden units")
     train_nn(X_tr, y_tr, X_te, y_te, hidden_dim=100, epochs=20, lr = 0.2)
